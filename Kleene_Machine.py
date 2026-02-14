@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import messagebox, font
+from tkinter import messagebox, font, ttk
 import math
 from collections import deque, defaultdict
 
@@ -26,20 +26,23 @@ class State:
 class NFA:
     def __init__(self, start, end):
         self.start = start
-        self.end = end  # Thomson construction usually produces one final state initially
+        self.end = end
 
     def get_all_states(self):
         """BFS to get all reachable states."""
         visited = set()
         queue = deque([self.start])
         states = []
+        visited.add(self.start)
+        states.append(self.start)
+        
         while queue:
             s = queue.popleft()
-            if s not in visited:
-                visited.add(s)
-                states.append(s)
-                for char, neighbors in s.transitions.items():
-                    for n in neighbors:
+            for char, neighbors in s.transitions.items():
+                for n in neighbors:
+                    if n not in visited:
+                        visited.add(n)
+                        states.append(n)
                         queue.append(n)
         return states
 
@@ -55,7 +58,6 @@ class DFA:
 
     def step(self, char):
         if char in self.current_state.transitions:
-            # DFA has exactly one transition per char (or goes to trap, implicit here)
             next_state = self.current_state.transitions[char][0]
             self.current_state = next_state
             return True
@@ -63,6 +65,30 @@ class DFA:
 
     def is_accepting(self):
         return self.current_state.is_final
+
+    def get_transition_table(self):
+        """Returns data for the transition table."""
+        # Rows: States, Cols: Alphabet
+        # Data: list of dictionaries
+        data = []
+        # Sort states naturally (S0, S1, S2...)
+        sorted_states = sorted(self.states, key=lambda s: int(s.label[1:]) if s.label[1:].isdigit() else s.label)
+        
+        for s in sorted_states:
+            # Mark start and final states in the table
+            marker = ""
+            if s == self.start: marker += "->"
+            if s.is_final: marker += "*"
+            
+            row = {"State": f"{marker}{s.label}"}
+            for char in self.alphabet:
+                if char in s.transitions:
+                    dest = s.transitions[char][0]
+                    row[char] = dest.label
+                else:
+                    row[char] = "-" # Trap/Dead state implicit
+            data.append(row)
+        return data
 
 # ==========================================
 # PART 2: REGEX PARSING & CONVERSION ALGORITHMS
@@ -73,114 +99,130 @@ class RegexProcessor:
         self.precedence = {'*': 3, '.': 2, '|': 1, '(': 0}
 
     def _insert_explicit_concat(self, regex):
-        """Inserts '.' for explicit concatenation."""
         res = ""
         for i in range(len(regex)):
             c1 = regex[i]
             res += c1
             if i + 1 < len(regex):
                 c2 = regex[i+1]
-                # Scenarios where we add dot:
-                # char-char (ab), char-( (a(), *-char (*a), *-( (*()
                 if (c1.isalnum() or c1 == '*' or c1 == ')') and (c2.isalnum() or c2 == '('):
                     res += '.'
         return res
 
     def _to_postfix(self, regex):
-        """Shunting-yard algorithm to convert infix regex to postfix."""
         output = []
         stack = []
-        
         for char in regex:
-            if char.isalnum():  # Operand
+            if char.isalnum():
                 output.append(char)
             elif char == '(':
                 stack.append(char)
             elif char == ')':
                 while stack and stack[-1] != '(':
                     output.append(stack.pop())
-                stack.pop() # Pop '('
+                stack.pop()
             elif char in self.precedence:
                 while stack and stack[-1] != '(' and self.precedence.get(stack[-1], 0) >= self.precedence[char]:
                     output.append(stack.pop())
                 stack.append(char)
-        
         while stack:
             output.append(stack.pop())
-        
         return "".join(output)
 
-    def regex_to_nfa(self, regex_str):
-        """Thomson's Construction Algorithm."""
-        if not regex_str:
-            return None
-            
-        formatted_regex = self._insert_explicit_concat(regex_str)
-        postfix = self._to_postfix(formatted_regex)
+    def _build_partial_nfa(self, postfix_subset):
+        """Builds NFA from a partial postfix string (for step visualization)."""
         stack = []
-
-        State._id_counter = 0 # Reset IDs for clean visualization
-
-        for char in postfix:
-            if char.isalnum(): # Basic symbol
+        State._id_counter = 0 # Reset for consistency
+        
+        for char in postfix_subset:
+            if char.isalnum():
                 start = State()
                 end = State()
                 start.add_transition(char, end)
                 stack.append(NFA(start, end))
-            
-            elif char == '.': # Concatenation
-                if len(stack) < 2: return None
+            elif char == '.':
+                if len(stack) < 2: return stack, "Error: missing operands for '.'"
                 n2 = stack.pop()
                 n1 = stack.pop()
-                # Connect n1 end to n2 start with epsilon
                 n1.end.add_transition('ε', n2.start)
-                n1.end.is_final = False # n1 end is no longer final
+                n1.end.is_final = False
                 stack.append(NFA(n1.start, n2.end))
-            
-            elif char == '|': # Union
-                if len(stack) < 2: return None
+            elif char == '|':
+                if len(stack) < 2: return stack, "Error: missing operands for '|'"
                 n2 = stack.pop()
                 n1 = stack.pop()
                 start = State()
                 end = State()
-                
-                # Split from new start
                 start.add_transition('ε', n1.start)
                 start.add_transition('ε', n2.start)
-                
-                # Converge to new end
                 n1.end.add_transition('ε', end)
                 n2.end.add_transition('ε', end)
-                
                 n1.end.is_final = False
                 n2.end.is_final = False
                 stack.append(NFA(start, end))
-                
-            elif char == '*': # Kleene Star
-                if not stack: return None
+            elif char == '*':
+                if not stack: return stack, "Error: missing operand for '*'"
                 n = stack.pop()
                 start = State()
                 end = State()
-                
                 start.add_transition('ε', n.start)
-                start.add_transition('ε', end) # Skip
-                
-                n.end.add_transition('ε', n.start) # Loop back
-                n.end.add_transition('ε', end) # Exit
-                
+                start.add_transition('ε', end)
+                n.end.add_transition('ε', n.start)
+                n.end.add_transition('ε', end)
                 n.end.is_final = False
                 stack.append(NFA(start, end))
         
-        if not stack: return None
+        return stack, None
+
+    def regex_to_nfa(self, regex_str):
+        formatted_regex = self._insert_explicit_concat(regex_str)
+        postfix = self._to_postfix(formatted_regex)
+        stack, error = self._build_partial_nfa(postfix)
+        
+        if error or not stack:
+            return None
+        
         result_nfa = stack.pop()
         result_nfa.end.is_final = True
         return result_nfa
 
+    def get_construction_history(self, regex_str):
+        """Generates snapshots of the stack for each step."""
+        formatted_regex = self._insert_explicit_concat(regex_str)
+        postfix = self._to_postfix(formatted_regex)
+        
+        steps = []
+        
+        # Start immediately with the first character operation
+        for i in range(1, len(postfix) + 1):
+            partial_postfix = postfix[:i]
+            current_char = postfix[i-1]
+            
+            # Re-run construction to get fresh state objects for this moment in time
+            current_stack, err = self._build_partial_nfa(partial_postfix)
+            
+            desc = ""
+            if current_char.isalnum():
+                desc = f"Push basic NFA for '{current_char}'"
+            elif current_char == '.':
+                desc = "Pop 2, Concatenate, Push result"
+            elif current_char == '|':
+                desc = "Pop 2, Union, Push result"
+            elif current_char == '*':
+                desc = "Pop 1, Apply Kleene Star, Push result"
+
+            steps.append({
+                "char": current_char,
+                "postfix": partial_postfix,
+                "stack": current_stack,
+                "description": desc
+            })
+            
+        return steps
+
     def nfa_to_dfa(self, nfa):
-        """Subset Construction Algorithm."""
         if not nfa: return None
         
-        # Helper: Epsilon Closure
         def get_epsilon_closure(states):
             stack = list(states)
             closure = set(states)
@@ -193,7 +235,6 @@ class RegexProcessor:
                             stack.append(next_s)
             return frozenset(closure)
 
-        # Helper: Move
         def move(states, char):
             res = set()
             for s in states:
@@ -202,7 +243,6 @@ class RegexProcessor:
                         res.add(next_s)
             return res
 
-        # 1. Determine Alphabet
         all_nfa_states = nfa.get_all_states()
         alphabet = set()
         for s in all_nfa_states:
@@ -211,18 +251,14 @@ class RegexProcessor:
                     alphabet.add(char)
         alphabet = sorted(list(alphabet))
 
-        # 2. Initial State
         initial_closure = get_epsilon_closure([nfa.start])
-        
-        # Mapping frozenset(states) -> DFA State object
         dfa_states_map = {}
         unprocessed = deque([initial_closure])
         
-        # Create DFA start state
         start_node = State(label="S0", is_final=any(s.is_final for s in initial_closure))
         dfa_states_map[initial_closure] = start_node
         
-        State._id_counter = 0 # Reset for DFA naming
+        State._id_counter = 0
         dfa_state_counter = 1
 
         while unprocessed:
@@ -231,9 +267,7 @@ class RegexProcessor:
             
             for char in alphabet:
                 next_set = get_epsilon_closure(move(current_set, char))
-                
-                if not next_set:
-                    continue # Dead state usually ignored in visuals or implicit
+                if not next_set: continue
                 
                 if next_set not in dfa_states_map:
                     is_final = any(s.is_final for s in next_set)
@@ -256,26 +290,19 @@ class AutomataCanvas(tk.Canvas):
         super().__init__(master, **kwargs)
         self.configure(bg="#f0f0f0")
         self.node_radius = 20
-        self.nodes_pos = {} # State obj -> (x, y)
+        self.nodes_pos = {} 
 
-    def _calculate_layout(self, start_node, all_states):
-        """
-        Simple level-based layout algorithm.
-        BFS to determine depth, then distribute vertically.
-        """
+    def _get_nfa_layout(self, start_node, all_states, width, height, offset_x=0):
+        """Calculates positions for a single NFA component."""
         levels = defaultdict(list)
         visited = {start_node}
         queue = deque([(start_node, 0)])
         levels[0].append(start_node)
-        
         max_depth = 0
         
-        # BFS for levels
         while queue:
             curr, depth = queue.popleft()
             max_depth = max(max_depth, depth)
-            
-            # Sort transitions to keep deterministic order
             sorted_trans = sorted(curr.transitions.items())
             for char, neighbors in sorted_trans:
                 for n in neighbors:
@@ -284,72 +311,109 @@ class AutomataCanvas(tk.Canvas):
                         levels[depth + 1].append(n)
                         queue.append((n, depth + 1))
         
-        # Handle disconnected components (though unlikely in valid construction)
+        # Add stragglers
         for s in all_states:
             if s not in visited:
                 levels[max_depth + 1].append(s)
                 visited.add(s)
 
-        # Assign coords
-        width = self.winfo_width()
-        height = self.winfo_height()
+        # Layout parameters
+        margin_y = 40
+        col_width = 80 
         
-        # Margins
-        margin_x = 60
-        margin_y = 60
+        local_pos = {}
         
-        if width < 100: width = 800
-        if height < 100: height = 600
-
-        col_width = (width - 2 * margin_x) / (len(levels) + 1 if len(levels) > 0 else 1)
+        # Calculate bounding box width for this NFA
+        total_cols = len(levels)
+        if total_cols == 0: total_cols = 1
+        nfa_width = total_cols * col_width + 40
         
-        self.nodes_pos = {}
+        # Determine minimum height needed for nodes so they don't overlap
+        max_nodes_in_col = 0
+        for states in levels.values():
+            max_nodes_in_col = max(max_nodes_in_col, len(states))
+        
+        min_needed_height = max_nodes_in_col * 60 + margin_y * 2
+        actual_height = max(height, min_needed_height)
         
         for depth, states in levels.items():
-            x = margin_x + depth * col_width * 1.5
-            row_height = (height - 2 * margin_y) / (len(states) + 1)
+            x = offset_x + 40 + depth * col_width
+            row_height = (actual_height - 2 * margin_y) / (len(states) + 1)
             for idx, s in enumerate(states):
                 y = margin_y + (idx + 1) * row_height
-                self.nodes_pos[s] = (x, y)
+                local_pos[s] = (x, y)
+                
+        return local_pos, nfa_width
 
     def draw_automaton(self, start_node, all_states):
+        """Legacy wrapper for single automaton drawing."""
         self.delete("all")
-        self._calculate_layout(start_node, all_states)
+        self.nodes_pos = {}
+        # We pass width/height, but _get_nfa_layout uses its own width logic and enforces min height
+        pos, _ = self._get_nfa_layout(start_node, all_states, self.winfo_width(), self.winfo_height())
+        self.nodes_pos = pos
+        self._draw_from_pos(all_states, start_node)
+        self.configure(scrollregion=self.bbox("all"))
+
+    def draw_multiple_nfas(self, nfa_list):
+        """Draws multiple disconnected NFAs side-by-side (for stack viz)."""
+        self.delete("all")
+        self.nodes_pos = {}
         
-        # Draw Transitions first (so they are under nodes)
+        current_offset_x = 0
+        h = self.winfo_height()
+        if h < 100: h = 500
+        
+        all_states_combined = []
+        
+        for nfa in nfa_list:
+            states = nfa.get_all_states()
+            all_states_combined.extend(states)
+            pos, width = self._get_nfa_layout(nfa.start, states, 0, h, current_offset_x)
+            self.nodes_pos.update(pos)
+            current_offset_x += width
+            
+        # Draw everything using the combined positions
+        start_nodes = {nfa.start for nfa in nfa_list}
+        self._draw_from_pos(all_states_combined, start_nodes)
+        self.configure(scrollregion=self.bbox("all"))
+
+    def _draw_from_pos(self, all_states, start_nodes):
+        # Handle single start node or set of start nodes
+        if isinstance(start_nodes, State):
+            start_nodes = {start_nodes}
+            
+        # Draw Transitions
         for s in all_states:
+            if s not in self.nodes_pos: continue
             x1, y1 = self.nodes_pos[s]
             
-            # Group transitions by destination
             grouped_trans = defaultdict(list)
             for char, dests in s.transitions.items():
                 for d in dests:
                     grouped_trans[d].append(char)
             
             for dest, chars in grouped_trans.items():
+                if dest not in self.nodes_pos: continue
                 x2, y2 = self.nodes_pos[dest]
                 label = ",".join(chars)
                 self._draw_edge(x1, y1, x2, y2, label, is_self_loop=(s == dest))
 
         # Draw Nodes
         for s in all_states:
+            if s not in self.nodes_pos: continue
             x, y = self.nodes_pos[s]
-            self._draw_node(x, y, s.label, s.is_final, is_start=(s == start_node))
+            self._draw_node(x, y, s.label, s.is_final, is_start=(s in start_nodes))
 
     def _draw_node(self, x, y, label, is_final, is_start):
         r = self.node_radius
         color = "#e1f5fe" if not is_start else "#ffe0b2"
         outline = "#01579b"
         
-        # Start arrow
         if is_start:
-            self.create_line(x - 50, y, x - r, y, arrow=tk.LAST, fill="#555", width=2)
-            self.create_text(x - 60, y, text="Start", fill="#555")
+            self.create_line(x - 40, y, x - r, y, arrow=tk.LAST, fill="#555", width=2)
 
-        # Main circle
         self.create_oval(x-r, y-r, x+r, y+r, fill=color, outline=outline, width=2)
-        
-        # Inner circle for final state
         if is_final:
             self.create_oval(x-r+4, y-r+4, x+r-4, y+r-4, outline=outline, width=2)
             
@@ -357,40 +421,28 @@ class AutomataCanvas(tk.Canvas):
 
     def _draw_edge(self, x1, y1, x2, y2, label, is_self_loop=False):
         r = self.node_radius
-        
         if is_self_loop:
-            # Draw a loop above the node
             self.create_line(x1, y1-r, x1, y1-3*r, x1+2*r, y1-3*r, x1+r*0.8, y1-r*0.8, smooth=True, arrow=tk.LAST, fill="#424242")
             self.create_text(x1+r, y1-3.5*r, text=label)
         else:
-            # Calculate angle for arrow trimming
             angle = math.atan2(y2 - y1, x2 - x1)
-            
-            # Trim line to stop at circle edge
             start_x = x1 + r * math.cos(angle)
             start_y = y1 + r * math.sin(angle)
             end_x = x2 - r * math.cos(angle)
             end_y = y2 - r * math.sin(angle)
             
-            # Check for bidirectional edges to curve them
-            # (Simple heuristic: if direct line, use straight, otherwise curve)
-            # Here we just curve everything slightly to avoid overlap on reverse paths
-            
             mid_x = (start_x + end_x) / 2
             mid_y = (start_y + end_y) / 2
-            
-            # Offset control point for curve
-            offset = 20
-            # Perpendicular vector
+            offset = 15
             cx = mid_x - offset * math.sin(angle)
             cy = mid_y + offset * math.cos(angle)
             
             self.create_line(start_x, start_y, cx, cy, end_x, end_y, smooth=True, arrow=tk.LAST, fill="#424242")
             
-            # Label pos
             lx = mid_x - (offset + 10) * math.sin(angle)
             ly = mid_y + (offset + 10) * math.cos(angle)
             self.create_text(lx, ly, text=label)
+
 
 # ==========================================
 # PART 4: MAIN APPLICATION GUI
@@ -400,11 +452,15 @@ class KleeneApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Kleene's Theorem Simulator")
-        self.root.geometry("1000x700")
+        self.root.geometry("1100x750")
         
         self.regex_processor = RegexProcessor()
         self.current_nfa = None
         self.current_dfa = None
+        
+        # Step visualization state
+        self.step_history = []
+        self.current_step_idx = 0
         
         self._setup_ui()
 
@@ -412,7 +468,6 @@ class KleeneApp:
         # Header
         header_frame = tk.Frame(self.root, bg="#263238", pady=10)
         header_frame.pack(fill=tk.X)
-        
         title = tk.Label(header_frame, text="Kleene's Machine: Regex → NFA → DFA", 
                          font=("Helvetica", 16, "bold"), bg="#263238", fg="white")
         title.pack()
@@ -422,112 +477,185 @@ class KleeneApp:
         control_frame.pack(fill=tk.X)
         
         tk.Label(control_frame, text="Regex:", bg="#ECEFF1", font=("Arial", 11)).pack(side=tk.LEFT)
-        self.regex_entry = tk.Entry(control_frame, width=30, font=("Arial", 11))
+        self.regex_entry = tk.Entry(control_frame, width=20, font=("Arial", 11))
         self.regex_entry.pack(side=tk.LEFT, padx=5)
-        self.regex_entry.insert(0, "(a|b)*abb") # Default Example
+        self.regex_entry.insert(0, "(a|b)*abb")
         
         btn_style = {"bg": "#2196F3", "fg": "white", "font": ("Arial", 10, "bold"), "relief": tk.FLAT, "padx": 10}
         
         tk.Button(control_frame, text="1. Build NFA", command=self.build_nfa, **btn_style).pack(side=tk.LEFT, padx=5)
-        tk.Button(control_frame, text="2. Convert to DFA", command=self.build_dfa, **btn_style).pack(side=tk.LEFT, padx=5)
+        tk.Button(control_frame, text="Steps", command=self.start_nfa_steps, bg="#FF9800", fg="white", font=("Arial", 10, "bold"), relief=tk.FLAT, padx=10).pack(side=tk.LEFT, padx=2)
+        
+        tk.Button(control_frame, text="2. Convert DFA", command=self.build_dfa, **btn_style).pack(side=tk.LEFT, padx=5)
+        self.btn_table = tk.Button(control_frame, text="Table", command=self.show_dfa_table, state=tk.DISABLED, bg="#FBC02D", fg="white", font=("Arial", 10, "bold"), relief=tk.FLAT, padx=10)
+        self.btn_table.pack(side=tk.LEFT, padx=2)
         
         # Test String Zone
-        tk.Label(control_frame, text=" |  Test String:", bg="#ECEFF1", font=("Arial", 11)).pack(side=tk.LEFT, padx=5)
-        self.test_entry = tk.Entry(control_frame, width=15, font=("Arial", 11))
+        tk.Label(control_frame, text="| Test:", bg="#ECEFF1", font=("Arial", 11)).pack(side=tk.LEFT, padx=5)
+        self.test_entry = tk.Entry(control_frame, width=10, font=("Arial", 11))
         self.test_entry.pack(side=tk.LEFT, padx=5)
         
-        test_btn_style = btn_style.copy()
-        test_btn_style["bg"] = "#4CAF50"
-        tk.Button(control_frame, text="Check", command=self.check_string, **test_btn_style).pack(side=tk.LEFT, padx=5)
+        tk.Button(control_frame, text="Check", command=self.check_string, bg="#4CAF50", fg="white", font=("Arial", 10, "bold"), relief=tk.FLAT, padx=10).pack(side=tk.LEFT, padx=5)
         
         self.result_lbl = tk.Label(control_frame, text="", bg="#ECEFF1", font=("Arial", 11, "bold"))
-        self.result_lbl.pack(side=tk.LEFT, padx=10)
+        self.result_lbl.pack(side=tk.LEFT, padx=5)
 
-        # Canvas Area
-        self.canvas = AutomataCanvas(self.root)
-        self.canvas.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # Step Control Panel (Initially Hidden)
+        self.step_frame = tk.Frame(self.root, bg="#FFECB3", pady=5)
+        # We pack this later when needed
         
-        # Info bar
-        self.info_lbl = tk.Label(self.root, text="Enter a regex using ( ) * | and alphanumeric characters.", bd=1, relief=tk.SUNKEN, anchor=tk.W)
+        tk.Button(self.step_frame, text="<< Prev", command=self.prev_step).pack(side=tk.LEFT, padx=20)
+        self.step_lbl = tk.Label(self.step_frame, text="Step 0", bg="#FFECB3", font=("Arial", 11, "bold"), width=40)
+        self.step_lbl.pack(side=tk.LEFT)
+        tk.Button(self.step_frame, text="Next >>", command=self.next_step).pack(side=tk.LEFT, padx=20)
+        tk.Button(self.step_frame, text="Close Steps", command=self.close_steps, bg="#F44336", fg="white").pack(side=tk.RIGHT, padx=10)
+
+        # Canvas Area with Scrollbars
+        canvas_frame = tk.Frame(self.root)
+        canvas_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        self.canvas = AutomataCanvas(canvas_frame)
+        
+        h_scroll = tk.Scrollbar(canvas_frame, orient=tk.HORIZONTAL, command=self.canvas.xview)
+        v_scroll = tk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=self.canvas.yview)
+        
+        self.canvas.configure(xscrollcommand=h_scroll.set, yscrollcommand=v_scroll.set)
+        
+        h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+        v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        self.info_lbl = tk.Label(self.root, text="Ready.", bd=1, relief=tk.SUNKEN, anchor=tk.W)
         self.info_lbl.pack(fill=tk.X)
 
     def build_nfa(self):
+        self.close_steps()
         regex = self.regex_entry.get().strip()
-        if not regex:
-            messagebox.showerror("Error", "Please enter a Regex.")
-            return
-        
+        if not regex: return
         try:
             self.current_nfa = self.regex_processor.regex_to_nfa(regex)
-            if not self.current_nfa:
-                raise ValueError("Invalid Regex Construction")
+            if not self.current_nfa: raise ValueError("Invalid Regex")
             
             states = self.current_nfa.get_all_states()
-            self.current_dfa = None # Invalidate old DFA
+            self.current_dfa = None
+            self.btn_table.config(state=tk.DISABLED)
+            
             self.canvas.draw_automaton(self.current_nfa.start, states)
-            self.info_lbl.config(text=f"NFA Generated: {len(states)} states. Implicit concatenation '.' added internally.")
+            self.info_lbl.config(text=f"NFA Generated: {len(states)} states.")
             self.result_lbl.config(text="")
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to build NFA: {str(e)}")
+            messagebox.showerror("Error", str(e))
+
+    def start_nfa_steps(self):
+        regex = self.regex_entry.get().strip()
+        if not regex: return
+        try:
+            self.step_history = self.regex_processor.get_construction_history(regex)
+            self.current_step_idx = 0
+            self.step_frame.pack(fill=tk.X, after=self.root.winfo_children()[1]) # Pack below controls
+            self.render_step()
+            self.info_lbl.config(text="Visualizing Thomson's Construction Steps...")
+        except Exception as e:
+            messagebox.showerror("Error", f"Step Gen Error: {e}")
+
+    def render_step(self):
+        if not self.step_history: return
+        step = self.step_history[self.current_step_idx]
+        
+        # Update text
+        desc = f"Step {self.current_step_idx}/{len(self.step_history)-1}: {step['description']}"
+        if step['char']: desc += f" (Char: {step['char']})"
+        self.step_lbl.config(text=desc)
+        
+        # Update Canvas
+        nfa_list = step['stack']
+        self.canvas.draw_multiple_nfas(nfa_list)
+
+    def next_step(self):
+        if self.current_step_idx < len(self.step_history) - 1:
+            self.current_step_idx += 1
+            self.render_step()
+
+    def prev_step(self):
+        if self.current_step_idx > 0:
+            self.current_step_idx -= 1
+            self.render_step()
+
+    def close_steps(self):
+        self.step_frame.pack_forget()
+        self.step_history = []
 
     def build_dfa(self):
+        self.close_steps()
         if not self.current_nfa:
-            messagebox.showwarning("Warning", "Build the NFA first!")
-            return
+            self.build_nfa()
+            if not self.current_nfa: return
             
         try:
             self.current_dfa = self.regex_processor.nfa_to_dfa(self.current_nfa)
             self.canvas.draw_automaton(self.current_dfa.start, self.current_dfa.states)
-            self.info_lbl.config(text=f"DFA Generated: {len(self.current_dfa.states)} states (via Subset Construction).")
+            self.info_lbl.config(text=f"DFA Generated: {len(self.current_dfa.states)} states.")
+            self.btn_table.config(state=tk.NORMAL)
             self.result_lbl.config(text="")
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to build DFA: {str(e)}")
+            messagebox.showerror("Error", str(e))
+
+    def show_dfa_table(self):
+        if not self.current_dfa: return
+        
+        win = tk.Toplevel(self.root)
+        win.title("DFA Transition Table")
+        win.geometry("400x400")
+        
+        data = self.current_dfa.get_transition_table()
+        if not data: return
+        
+        cols = list(data[0].keys())
+        
+        tree = ttk.Treeview(win, columns=cols, show="headings")
+        for c in cols:
+            tree.heading(c, text=c)
+            tree.column(c, width=80, anchor=tk.CENTER)
+            
+        for row in data:
+            vals = [row[c] for c in cols]
+            tree.insert("", tk.END, values=vals)
+            
+        tree.pack(fill=tk.BOTH, expand=True)
 
     def check_string(self):
+        # ... (Identical to previous implementation) ...
         test_str = self.test_entry.get().strip()
         
         if self.current_dfa:
-            # Use DFA logic
             self.current_dfa.reset()
             valid = True
             for char in test_str:
                 if not self.current_dfa.step(char):
-                    valid = False
-                    break
-            
+                    valid = False; break
             is_accepted = valid and self.current_dfa.is_accepting()
             self._show_result(is_accepted)
             
         elif self.current_nfa:
-            # Simple NFA Simulation (Recursive or Set based)
-            # Using set based simulation here similar to subset construction on the fly
             current_states = {self.current_nfa.start}
-            
-            # Helper for epsilon closure
             def epsilon_expand(states):
-                stack = list(states)
-                closure = set(states)
+                stack = list(states); closure = set(states)
                 while stack:
                     s = stack.pop()
                     if 'ε' in s.transitions:
                         for n in s.transitions['ε']:
                             if n not in closure:
-                                closure.add(n)
-                                stack.append(n)
+                                closure.add(n); stack.append(n)
                 return closure
 
             current_states = epsilon_expand(current_states)
-            
             valid = True
             for char in test_str:
                 next_states = set()
                 for s in current_states:
                     if char in s.transitions:
                         next_states.update(s.transitions[char])
-                
-                if not next_states:
-                    valid = False
-                    break
+                if not next_states: valid = False; break
                 current_states = epsilon_expand(next_states)
             
             is_accepted = valid and any(s.is_final for s in current_states)
