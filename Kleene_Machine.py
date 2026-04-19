@@ -543,9 +543,10 @@ class AutomataCanvas(tk.Canvas):
 
     def _draw_edge(self, x1, y1, x2, y2, label, is_self_loop=False):
         r = self.node_radius * self.zoom_factor
+        font_size = max(8, int(10 * self.zoom_factor))
         if is_self_loop:
             self.create_line(x1, y1-r, x1, y1-3*r, x1+2*r, y1-3*r, x1+r*0.8, y1-r*0.8, smooth=True, arrow=tk.LAST, fill="white")
-            self.create_text(x1+r, y1-3.5*r, text=label, fill="white")
+            self.create_text(x1+r, y1-3.5*r, text=label, font=("Helvetica", font_size, "bold"), fill="white")
         else:
             angle = math.atan2(y2 - y1, x2 - x1)
             start_x = x1 + r * math.cos(angle)
@@ -563,7 +564,7 @@ class AutomataCanvas(tk.Canvas):
             
             lx = mid_x - (offset + 10) * math.sin(angle)
             ly = mid_y + (offset + 10) * math.cos(angle)
-            self.create_text(lx, ly, text=label, fill="white")
+            self.create_text(lx, ly, text=label, font=("Helvetica", font_size, "bold"), fill="white")
 
 
 # PART 4: MAIN APPLICATION GUI
