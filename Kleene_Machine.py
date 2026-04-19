@@ -3,9 +3,9 @@ from tkinter import messagebox, font, ttk
 import math
 from collections import deque, defaultdict
 
-# ==========================================
+
 # PART 1: AUTOMATA LOGIC & DATA STRUCTURES
-# ==========================================
+
 
 class State:
     _id_counter = 0
@@ -90,9 +90,7 @@ class DFA:
             data.append(row)
         return data
 
-# ==========================================
 # PART 2: REGEX PARSING & CONVERSION ALGORITHMS
-# ==========================================
 
 class RegexProcessor:
     def __init__(self):
@@ -280,17 +278,136 @@ class RegexProcessor:
         
         return DFA(start_node, list(dfa_states_map.values()), alphabet)
 
+    def minimize_dfa(self, dfa):
+        if not dfa:
+            return None
+        if not dfa.states:
+            return dfa
 
-# ==========================================
+        def state_sort_key(state):
+            suffix = state.label[1:]
+            return (0, int(suffix)) if suffix.isdigit() else (1, state.label)
+
+        # Remove unreachable states before partitioning.
+        reachable = set()
+        queue = deque([dfa.start])
+        reachable.add(dfa.start)
+        while queue:
+            curr = queue.popleft()
+            for char in dfa.alphabet:
+                if char in curr.transitions:
+                    nxt = curr.transitions[char][0]
+                    if nxt not in reachable:
+                        reachable.add(nxt)
+                        queue.append(nxt)
+
+        final_states = {s for s in reachable if s.is_final}
+        non_final_states = reachable - final_states
+
+        partitions = []
+        if final_states:
+            partitions.append(final_states)
+        if non_final_states:
+            partitions.append(non_final_states)
+
+        # Standard partition refinement.
+        changed = True
+        while changed:
+            changed = False
+            state_to_block = {}
+            for idx, block in enumerate(partitions):
+                for state in block:
+                    state_to_block[state] = idx
+
+            next_partitions = []
+            for block in partitions:
+                signatures = defaultdict(set)
+                for state in block:
+                    signature = []
+                    for char in dfa.alphabet:
+                        if char in state.transitions:
+                            target = state.transitions[char][0]
+                            signature.append(state_to_block[target])
+                        else:
+                            signature.append(-1)
+                    signatures[tuple(signature)].add(state)
+
+                if len(signatures) > 1:
+                    changed = True
+                next_partitions.extend(signatures.values())
+            partitions = next_partitions
+
+        # Start block first, then deterministic ordering by representative label.
+        start_block = None
+        for block in partitions:
+            if dfa.start in block:
+                start_block = block
+                break
+        ordered_blocks = []
+        if start_block is not None:
+            ordered_blocks.append(start_block)
+        remaining_blocks = [b for b in partitions if b is not start_block]
+        remaining_blocks.sort(key=lambda b: state_sort_key(min(b, key=state_sort_key)))
+        ordered_blocks.extend(remaining_blocks)
+
+        new_states = []
+        block_to_new_state = {}
+        old_to_new_state = {}
+
+        for idx, block in enumerate(ordered_blocks):
+            representative = min(block, key=state_sort_key)
+            new_state = State(label=f"S{idx}", is_final=representative.is_final)
+            new_states.append(new_state)
+            block_to_new_state[frozenset(block)] = new_state
+            for old_state in block:
+                old_to_new_state[old_state] = new_state
+
+        for block in ordered_blocks:
+            representative = min(block, key=state_sort_key)
+            src_new = old_to_new_state[representative]
+            for char in dfa.alphabet:
+                if char in representative.transitions:
+                    dst_old = representative.transitions[char][0]
+                    src_new.add_transition(char, old_to_new_state[dst_old])
+
+        return DFA(old_to_new_state[dfa.start], new_states, dfa.alphabet)
+
+
+
 # PART 3: VISUALIZATION ENGINE (Tkinter)
-# ==========================================
+
 
 class AutomataCanvas(tk.Canvas):
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
-        self.configure(bg="#f0f0f0")
+        self.configure(bg="#1a1a2e")
         self.node_radius = 20
-        self.nodes_pos = {} 
+        self.nodes_pos = {}
+        self.zoom_factor = 1.0
+        self.min_zoom = 0.5
+        self.max_zoom = 2.5
+        self._last_draw_mode = None
+        self._last_payload = None
+
+    def zoom_in(self):
+        self._set_zoom(self.zoom_factor * 1.2)
+
+    def zoom_out(self):
+        self._set_zoom(self.zoom_factor / 1.2)
+
+    def _set_zoom(self, new_zoom):
+        clamped = max(self.min_zoom, min(self.max_zoom, new_zoom))
+        if abs(clamped - self.zoom_factor) < 1e-9:
+            return
+        self.zoom_factor = clamped
+        self._redraw_last()
+
+    def _redraw_last(self):
+        if self._last_draw_mode == "single" and self._last_payload:
+            start_node, all_states = self._last_payload
+            self.draw_automaton(start_node, all_states)
+        elif self._last_draw_mode == "multiple" and self._last_payload is not None:
+            self.draw_multiple_nfas(self._last_payload)
 
     def _get_nfa_layout(self, start_node, all_states, width, height, offset_x=0):
         """Calculates positions for a single NFA component."""
@@ -318,26 +435,26 @@ class AutomataCanvas(tk.Canvas):
                 visited.add(s)
 
         # Layout parameters
-        margin_y = 40
-        col_width = 80 
+        margin_y = int(40 * self.zoom_factor)
+        col_width = int(80 * self.zoom_factor)
         
         local_pos = {}
         
         # Calculate bounding box width for this NFA
         total_cols = len(levels)
         if total_cols == 0: total_cols = 1
-        nfa_width = total_cols * col_width + 40
+        nfa_width = total_cols * col_width + int(40 * self.zoom_factor)
         
         # Determine minimum height needed for nodes so they don't overlap
         max_nodes_in_col = 0
         for states in levels.values():
             max_nodes_in_col = max(max_nodes_in_col, len(states))
         
-        min_needed_height = max_nodes_in_col * 60 + margin_y * 2
+        min_needed_height = int(max_nodes_in_col * (60 * self.zoom_factor) + margin_y * 2)
         actual_height = max(height, min_needed_height)
         
         for depth, states in levels.items():
-            x = offset_x + 40 + depth * col_width
+            x = offset_x + int(40 * self.zoom_factor) + depth * col_width
             row_height = (actual_height - 2 * margin_y) / (len(states) + 1)
             for idx, s in enumerate(states):
                 y = margin_y + (idx + 1) * row_height
@@ -347,6 +464,8 @@ class AutomataCanvas(tk.Canvas):
 
     def draw_automaton(self, start_node, all_states):
         """Legacy wrapper for single automaton drawing."""
+        self._last_draw_mode = "single"
+        self._last_payload = (start_node, all_states)
         self.delete("all")
         self.nodes_pos = {}
         # We pass width/height, but _get_nfa_layout uses its own width logic and enforces min height
@@ -357,6 +476,8 @@ class AutomataCanvas(tk.Canvas):
 
     def draw_multiple_nfas(self, nfa_list):
         """Draws multiple disconnected NFAs side-by-side (for stack viz)."""
+        self._last_draw_mode = "multiple"
+        self._last_payload = nfa_list
         self.delete("all")
         self.nodes_pos = {}
         
@@ -406,24 +527,25 @@ class AutomataCanvas(tk.Canvas):
             self._draw_node(x, y, s.label, s.is_final, is_start=(s in start_nodes))
 
     def _draw_node(self, x, y, label, is_final, is_start):
-        r = self.node_radius
-        color = "#e1f5fe" if not is_start else "#ffe0b2"
-        outline = "#01579b"
+        r = self.node_radius * self.zoom_factor
+        color = "#9c88ff" if not is_start else "#6c5ce7"  # Violet shades
+        outline = "#a29bfe"  # Light violet outline
+        font_size = max(8, int(10 * self.zoom_factor))
         
         if is_start:
-            self.create_line(x - 40, y, x - r, y, arrow=tk.LAST, fill="#555", width=2)
+            self.create_line(x - (40 * self.zoom_factor), y, x - r, y, arrow=tk.LAST, fill="white", width=2)
 
         self.create_oval(x-r, y-r, x+r, y+r, fill=color, outline=outline, width=2)
         if is_final:
             self.create_oval(x-r+4, y-r+4, x+r-4, y+r-4, outline=outline, width=2)
             
-        self.create_text(x, y, text=label, font=("Helvetica", 10, "bold"))
+        self.create_text(x, y, text=label, font=("Helvetica", font_size, "bold"), fill="white")
 
     def _draw_edge(self, x1, y1, x2, y2, label, is_self_loop=False):
-        r = self.node_radius
+        r = self.node_radius * self.zoom_factor
         if is_self_loop:
-            self.create_line(x1, y1-r, x1, y1-3*r, x1+2*r, y1-3*r, x1+r*0.8, y1-r*0.8, smooth=True, arrow=tk.LAST, fill="#424242")
-            self.create_text(x1+r, y1-3.5*r, text=label)
+            self.create_line(x1, y1-r, x1, y1-3*r, x1+2*r, y1-3*r, x1+r*0.8, y1-r*0.8, smooth=True, arrow=tk.LAST, fill="white")
+            self.create_text(x1+r, y1-3.5*r, text=label, fill="white")
         else:
             angle = math.atan2(y2 - y1, x2 - x1)
             start_x = x1 + r * math.cos(angle)
@@ -433,26 +555,42 @@ class AutomataCanvas(tk.Canvas):
             
             mid_x = (start_x + end_x) / 2
             mid_y = (start_y + end_y) / 2
-            offset = 15
+            offset = 15 * self.zoom_factor
             cx = mid_x - offset * math.sin(angle)
             cy = mid_y + offset * math.cos(angle)
             
-            self.create_line(start_x, start_y, cx, cy, end_x, end_y, smooth=True, arrow=tk.LAST, fill="#424242")
+            self.create_line(start_x, start_y, cx, cy, end_x, end_y, smooth=True, arrow=tk.LAST, fill="white")
             
             lx = mid_x - (offset + 10) * math.sin(angle)
             ly = mid_y + (offset + 10) * math.cos(angle)
-            self.create_text(lx, ly, text=label)
+            self.create_text(lx, ly, text=label, fill="white")
 
 
-# ==========================================
 # PART 4: MAIN APPLICATION GUI
-# ==========================================
+
 
 class KleeneApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Kleene's Theorem Simulator")
         self.root.geometry("1100x750")
+        self.root.configure(bg="#1e1e2e")  # Dark background
+        
+        # Set ttk style
+        style = ttk.Style()
+        style.theme_use('clam')  # Modern theme
+        
+        # Custom styles
+        style.configure('TButton', font=('Arial', 10, 'bold'), padding=6)
+        style.configure('Fun.TButton', background='#ff6b6b', foreground='white', borderwidth=0)
+        style.map('Fun.TButton', background=[('active', '#ff5252')], foreground=[('active', 'white')])
+        
+        style.configure('Test.TButton', background='#4ecdc4', foreground='white')
+        style.map('Test.TButton', background=[('active', '#45b7aa')], foreground=[('active', 'white')])
+        
+        style.configure('Treeview', background='#2d2d3a', foreground='white', fieldbackground='#2d2d3a')
+        style.configure('Treeview.Heading', background='#ff6b6b', foreground='white')
+        style.map('Treeview', background=[('selected', '#ff6b6b')])
         
         self.regex_processor = RegexProcessor()
         self.current_nfa = None
@@ -466,55 +604,52 @@ class KleeneApp:
 
     def _setup_ui(self):
         # Header
-        header_frame = tk.Frame(self.root, bg="#263238", pady=10)
+        header_frame = tk.Frame(self.root, bg="#ff6b6b", pady=15)
         header_frame.pack(fill=tk.X)
-        title = tk.Label(header_frame, text="Kleene's Machine: Regex → NFA → DFA", 
-                         font=("Helvetica", 16, "bold"), bg="#263238", fg="white")
+        title = tk.Label(header_frame, text="🚀 Kleene's Machine: Regex → NFA → DFA 🚀", 
+                         font=("Helvetica", 18, "bold"), bg="#ff6b6b", fg="white")
         title.pack()
 
         # Input Zone
-        control_frame = tk.Frame(self.root, pady=10, padx=10, bg="#ECEFF1")
+        control_frame = tk.Frame(self.root, pady=15, padx=15, bg="#2d2d3a")
         control_frame.pack(fill=tk.X)
         
-        tk.Label(control_frame, text="Regex:", bg="#ECEFF1", font=("Arial", 11)).pack(side=tk.LEFT)
+        tk.Label(control_frame, text="Regex:", bg="#2d2d3a", fg="white", font=("Arial", 12, "bold")).pack(side=tk.LEFT)
         self.regex_entry = tk.Entry(control_frame, width=20, font=("Arial", 11))
         self.regex_entry.pack(side=tk.LEFT, padx=5)
         self.regex_entry.insert(0, "(a|b)*abb")
         
-        btn_style = {"bg": "#2196F3", "fg": "white", "font": ("Arial", 10, "bold"), "relief": tk.FLAT, "padx": 10}
+        tk.Button(control_frame, text="1. Build NFA", command=self.build_nfa, bg="#ff6b6b", fg="white", font=("Arial", 10, "bold"), relief=tk.FLAT, padx=10).pack(side=tk.LEFT, padx=5)
+        tk.Button(control_frame, text="Steps", command=self.start_nfa_steps, bg="#ff6b6b", fg="white", font=("Arial", 10, "bold"), relief=tk.FLAT, padx=10).pack(side=tk.LEFT, padx=2)
         
-        tk.Button(control_frame, text="1. Build NFA", command=self.build_nfa, **btn_style).pack(side=tk.LEFT, padx=5)
-        tk.Button(control_frame, text="Steps", command=self.start_nfa_steps, bg="#FF9800", fg="white", font=("Arial", 10, "bold"), relief=tk.FLAT, padx=10).pack(side=tk.LEFT, padx=2)
-        
-        tk.Button(control_frame, text="2. Convert DFA", command=self.build_dfa, **btn_style).pack(side=tk.LEFT, padx=5)
-        self.btn_table = tk.Button(control_frame, text="Table", command=self.show_dfa_table, state=tk.DISABLED, bg="#FBC02D", fg="white", font=("Arial", 10, "bold"), relief=tk.FLAT, padx=10)
+        tk.Button(control_frame, text="2. Convert DFA", command=self.build_dfa, bg="#ff6b6b", fg="white", font=("Arial", 10, "bold"), relief=tk.FLAT, padx=10).pack(side=tk.LEFT, padx=5)
+        self.btn_table = tk.Button(control_frame, text="Table", command=self.show_dfa_table, state=tk.DISABLED, bg="#ff6b6b", fg="white", disabledforeground="white", font=("Arial", 10, "bold"), relief=tk.FLAT, padx=10)
         self.btn_table.pack(side=tk.LEFT, padx=2)
         
         # Test String Zone
-        tk.Label(control_frame, text="| Test:", bg="#ECEFF1", font=("Arial", 11)).pack(side=tk.LEFT, padx=5)
+        tk.Label(control_frame, text="| Test:", bg="#2d2d3a", fg="white", font=("Arial", 12, "bold")).pack(side=tk.LEFT, padx=5)
         self.test_entry = tk.Entry(control_frame, width=10, font=("Arial", 11))
         self.test_entry.pack(side=tk.LEFT, padx=5)
         
-        tk.Button(control_frame, text="Check", command=self.check_string, bg="#4CAF50", fg="white", font=("Arial", 10, "bold"), relief=tk.FLAT, padx=10).pack(side=tk.LEFT, padx=5)
-        
-        self.result_lbl = tk.Label(control_frame, text="", bg="#ECEFF1", font=("Arial", 11, "bold"))
-        self.result_lbl.pack(side=tk.LEFT, padx=5)
+        tk.Button(control_frame, text="Check", command=self.check_string, bg="#4ecdc4", fg="white", font=("Arial", 10, "bold"), relief=tk.FLAT, padx=10).pack(side=tk.LEFT, padx=5)
 
         # Step Control Panel (Initially Hidden)
-        self.step_frame = tk.Frame(self.root, bg="#FFECB3", pady=5)
+        self.step_frame = tk.Frame(self.root, bg="#ffeaa7", pady=10)
         # We pack this later when needed
         
-        tk.Button(self.step_frame, text="<< Prev", command=self.prev_step).pack(side=tk.LEFT, padx=20)
-        self.step_lbl = tk.Label(self.step_frame, text="Step 0", bg="#FFECB3", font=("Arial", 11, "bold"), width=40)
+        tk.Button(self.step_frame, text="<< Prev", command=self.prev_step, bg="#ff6b6b", fg="white", font=("Arial", 10, "bold"), relief=tk.FLAT, padx=10).pack(side=tk.LEFT, padx=20)
+        self.step_lbl = tk.Label(self.step_frame, text="Step 0", bg="#ffeaa7", fg="black", font=("Arial", 12, "bold"), width=40)
         self.step_lbl.pack(side=tk.LEFT)
-        tk.Button(self.step_frame, text="Next >>", command=self.next_step).pack(side=tk.LEFT, padx=20)
-        tk.Button(self.step_frame, text="Close Steps", command=self.close_steps, bg="#F44336", fg="white").pack(side=tk.RIGHT, padx=10)
+        tk.Button(self.step_frame, text="Next >>", command=self.next_step, bg="#ff6b6b", fg="white", font=("Arial", 10, "bold"), relief=tk.FLAT, padx=10).pack(side=tk.LEFT, padx=20)
+        tk.Button(self.step_frame, text="Close Steps", command=self.close_steps, bg="#ff6b6b", fg="white", font=("Arial", 10, "bold"), relief=tk.FLAT, padx=10).pack(side=tk.RIGHT, padx=10)
 
         # Canvas Area with Scrollbars
         canvas_frame = tk.Frame(self.root)
         canvas_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         self.canvas = AutomataCanvas(canvas_frame)
+        tk.Button(control_frame, text="Zoom +", command=self.canvas.zoom_in, bg="#a8e6cf", fg="black", font=("Arial", 10, "bold"), relief=tk.FLAT, padx=10).pack(side=tk.LEFT, padx=2)
+        tk.Button(control_frame, text="Zoom -", command=self.canvas.zoom_out, bg="#a8e6cf", fg="black", font=("Arial", 10, "bold"), relief=tk.FLAT, padx=10).pack(side=tk.LEFT, padx=2)
         
         h_scroll = tk.Scrollbar(canvas_frame, orient=tk.HORIZONTAL, command=self.canvas.xview)
         v_scroll = tk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=self.canvas.yview)
@@ -525,7 +660,7 @@ class KleeneApp:
         v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
-        self.info_lbl = tk.Label(self.root, text="Ready.", bd=1, relief=tk.SUNKEN, anchor=tk.W)
+        self.info_lbl = tk.Label(self.root, text="Ready.", bd=1, relief=tk.SUNKEN, anchor=tk.W, bg="#2d2d3a", fg="white")
         self.info_lbl.pack(fill=tk.X)
 
     def build_nfa(self):
@@ -542,7 +677,6 @@ class KleeneApp:
             
             self.canvas.draw_automaton(self.current_nfa.start, states)
             self.info_lbl.config(text=f"NFA Generated: {len(states)} states.")
-            self.result_lbl.config(text="")
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
@@ -592,11 +726,11 @@ class KleeneApp:
             if not self.current_nfa: return
             
         try:
-            self.current_dfa = self.regex_processor.nfa_to_dfa(self.current_nfa)
+            raw_dfa = self.regex_processor.nfa_to_dfa(self.current_nfa)
+            self.current_dfa = self.regex_processor.minimize_dfa(raw_dfa)
             self.canvas.draw_automaton(self.current_dfa.start, self.current_dfa.states)
-            self.info_lbl.config(text=f"DFA Generated: {len(self.current_dfa.states)} states.")
+            self.info_lbl.config(text=f"Minimized DFA Generated: {len(self.current_dfa.states)} states.")
             self.btn_table.config(state=tk.NORMAL)
-            self.result_lbl.config(text="")
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
@@ -606,13 +740,14 @@ class KleeneApp:
         win = tk.Toplevel(self.root)
         win.title("DFA Transition Table")
         win.geometry("400x400")
+        win.configure(bg="#1e1e2e")
         
         data = self.current_dfa.get_transition_table()
         if not data: return
         
         cols = list(data[0].keys())
         
-        tree = ttk.Treeview(win, columns=cols, show="headings")
+        tree = ttk.Treeview(win, columns=cols, show="headings", style='Treeview')
         for c in cols:
             tree.heading(c, text=c)
             tree.column(c, width=80, anchor=tk.CENTER)
@@ -664,10 +799,35 @@ class KleeneApp:
             messagebox.showwarning("Warning", "Please build an automaton first.")
 
     def _show_result(self, accepted):
+        # Create a custom popup window
+        popup = tk.Toplevel(self.root)
+        popup.title("Result")
+        popup.geometry("300x150")
+        popup.configure(bg="#1e1e2e")
+        popup.resizable(False, False)
+        
+        # Center the popup
+        popup.transient(self.root)
+        popup.grab_set()
+        
+        frame = tk.Frame(popup, bg="#1e1e2e", padx=20, pady=20)
+        frame.pack(expand=True, fill=tk.BOTH)
+        
         if accepted:
-            self.result_lbl.config(text="ACCEPTED", fg="green")
+            color = "#4ecdc4"
+            text = "✅ Accepted!"
+            emoji = "🎉"
         else:
-            self.result_lbl.config(text="REJECTED", fg="red")
+            color = "#ff6b6b"
+            text = "❌ Rejected!"
+            emoji = "😞"
+        
+        result_label = tk.Label(frame, text=f"{emoji}\n{text}", font=("Arial", 16, "bold"), 
+                               bg="#1e1e2e", fg=color, justify=tk.CENTER)
+        result_label.pack(expand=True)
+        
+        ok_btn = tk.Button(frame, text="OK", command=popup.destroy, bg="#ff6b6b", fg="white", font=("Arial", 10, "bold"), relief=tk.FLAT, padx=10)
+        ok_btn.pack(pady=10)
 
 if __name__ == "__main__":
     root = tk.Tk()
